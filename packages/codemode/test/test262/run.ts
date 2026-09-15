@@ -42,7 +42,7 @@ export const run = async (file: string): Promise<Outcome> => {
   // work instead, so drain explicitly.
   const drain = meta.flags?.includes("async") ? "\nfor (let i = 0; i < 100; i++) await null" : ""
   const result = await Effect.runPromise(
-    executeProgram(`"use strict";\n${source}${drain}`, prepared, limits, {}, (ctx) =>
+    executeProgram(`"use strict";\n${source}${drain}`, prepared, limits, undefined, (ctx) =>
       harness(ctx, (error) => {
         done ??= { error }
       }),

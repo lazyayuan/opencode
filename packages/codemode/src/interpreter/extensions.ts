@@ -1,6 +1,7 @@
 import { Effect } from "effect"
 import type { Extension } from "../extension.js"
 import { coerceToString } from "../stdlib/value.js"
+import type { Call } from "../tool-runtime.js"
 import type { Interpreter } from "./interpreter.js"
 import { createErrorValue, isErrorType } from "./intrinsics.js"
 import { MAX_VALUE_DEPTH } from "./limits.js"
@@ -128,26 +129,32 @@ export const extensionGlobals = <R>(
     throw typeError(`${label} produced ${describeHost(value)}, which the program cannot hold.`)
   }
 
-  // A host function as a program function: arguments cross in, and whatever it returns, resolves, throws, or
-  // rejects with crosses out, so the program catches what the author threw.
-  const wrap = (value: Function, label: string): Native<R> =>
+  // A host function as a program function. Arguments cross in; a global's call is observed by the host's `onCall`
+  // with the host's own error on failure; then whatever came back, or was thrown, crosses out so the program catches
+  // a copy. Functions inside results are part of a value's API and are not observed.
+  const wrap = (value: Function, label: string, describe?: (args: ReadonlyArray<unknown>) => Call): Native<R> =>
     fn<R>(builtins, value.name, value.length, (_, values) => {
-      const converted = values.map((item, index) => toHost(item, `Argument ${index + 1} to ${label}`))
-      const thrown = (reason: unknown) => new Throw(fromHost(reason, label))
+      const args = values.map((item, index) => toHost(item, `Argument ${index + 1} to ${label}`))
+      const settle = (run: Effect.Effect<unknown, unknown, R>) =>
+        (describe === undefined ? run : ctx.tools.observe(describe(args), run)).pipe(
+          Effect.mapError((reason) => new Throw(fromHost(reason, label))),
+          Effect.map((settled) => fromHost(settled, label)),
+        )
       let result: unknown
       try {
-        result = value.apply(undefined, converted)
+        result = value.apply(undefined, args)
       } catch (reason) {
-        return Effect.fail(thrown(reason))
+        return settle(Effect.fail(reason))
       }
-      if (!(result instanceof Promise)) return fromHost(result, label)
-      return ctx.pending.create(
-        Effect.map(Effect.tryPromise({ try: () => result, catch: thrown }), (settled) => fromHost(settled, label)),
-      )
+      if (!(result instanceof Promise)) return settle(Effect.succeed(result))
+      return ctx.pending.create(settle(Effect.tryPromise({ try: () => result, catch: (reason) => reason })))
     })
 
   return extensions.flatMap((extension) =>
-    Object.entries(extension.globals).map(([name, value]) => [name, wrap(value, name)] as const),
+    Object.entries(extension.globals).map(
+      ([name, value]) =>
+        [name, wrap(value, name, (args) => ({ type: "extension", extension: extension.name, name, args }))] as const,
+    ),
   )
 }
 
